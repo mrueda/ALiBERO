@@ -1,0 +1,76 @@
+#!/pro/icm/icm/icm
+call _startup
+l_info=no
+
+## Refine pocket with a few top 'active' hits
+sn = "r" # root name for the output files
+N_top=NTOP   
+
+##########
+read sys ls -d v{?,??,???}.ob
+Sdir = Split(s_out, "\n")
+
+read index "LIGAND_FILE"
+read table index INX_NAME name="chem" #to get .IX column
+
+num=1
+for n=1,Nof(Sdir)
+ Ndir=Replace(Sdir[n] "v" "")
+ Ndir=Replace(Ndir ".ob" "")
+ NdirAns = "DOCK_" + Ndir + "/?/TEST_answers*"
+ hitlistVar = "\"DOCK_" + Ndir + "/1/TEST\" \"" + NdirAns + "\" \"T\" no yes yes"
+ scanMakeHitList "DOCK_1/1/TEST" NdirAns "T" no yes yes
+ currentDockProj.data[13] = "REFINEMENT"
+ T= (T.IX == Iarray((chem.Active==1).IX))  ## 'T' table with only actives
+ sort T.Score
+
+ r_ener = 999.   #SK
+ for i=1, N_top
+  ## read complex (multiple directories) 
+  s_rec=Replace(T.FILE[i] "_answers*." "_rec.")
+  sn1=sn+String(i)+"_"+String(n)
+  read object s_rec name= sn1
+  read object T.FILE[i] number=T.POS[i] 
+  move a_ a_$sn1.
+  set obj a_$sn1.
+
+  # any restraints for refinement
+  # Anchor residue - select manually, need  protein 
+  set terms "vw,14,hb,el,to,ss,cn"
+  cnWeight=10.
+
+  set drestraint type 1 10. 2.3 3.0
+
+  #sel_dres= Sphere(a_/116/od* a_m//M34 30.) #MMFF type 34 for charged N
+  #if (Nof(sel_dres)>0)  set drestraint all (a_/116/od*) sel_dres[1] 1
+
+  #sel_dres2= Sphere(a_/199/og a_m//M6 30.) #MMFF type 6 for OH indol
+  #if (Nof(sel_dres2)>0)  set drestraint  (a_/199/og) sel_dres2[1] 1
+  
+  minimize v_m
+  vsel_min= v_m | (v_//x* & Res(Sphere(a_m a_A 12.))) ###definition of flexibility
+  vsel_mc= v_m | (v_//x* & Res(Sphere(a_m a_A 4.)))
+  unds window
+  montecarlo vsel_mc vsel_min mncallsMC=10000 temperature=900
+
+  load conf 1
+
+  show energy v_m
+  Energy("func" )
+  refName = sn+String(num)
+  refNameComplex = sn+ "Complex" +String(num)
+  rename a_$sn1. refNameComplex                                           #SK
+  write object a_$refNameComplex.
+  delete a_m
+  rename a_$refNameComplex. refName
+  write object a_$refName.
+  delete a_
+ num = num + 1
+ endfor
+
+endfor
+
+sys rm ./T.sdf
+sys rm *.cnf
+sys rm v{?,??,???}.ob #So that we can get fresh ones with Hitlist_Ref.icm
+q

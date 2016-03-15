@@ -1,0 +1,192 @@
+Installation Instructions
+-------------------------------
+
+ALiBERO is a Perl script and thus it does not require any prior "compilation". 
+Anyhow, you will need to "install" it to make it work.
+
+ 1) Uncompress the script into your installation directory.
+     Inside you will see several subdirectories (e.g., ALiBERO, MACROS, etc.),
+     as well as a few files such as this README, 
+     a LICENSE, the alibero exe and an installation bash script. 
+     You should also have a PDF with a "hands-on" description.
+     Change to this working directory after the unpacking is complete.
+
+ 2) Edit the file 'install.sh'; change the values for
+     $alibero, $l_icm and $r_icm variables for your paths.
+
+ 3) Perform the installation by either executing "./install.sh" or "bash install.sh".
+    Change the permissions so that the installation folder becomes 'rx'
+    cd .. ; chmod -R 755 alibero_version_you_got/
+
+ 4) After the installation is complete, copy the folder "test" and all its contents 
+     to a different location and perform a few runs in your Desktop machine. 
+     You may need to change paths within the parameters file.
+    
+     To see ALiBERO manual type:
+     $path_to_alibero/alibero -man
+ 
+ 5) If you plan to submit jobs to a PBS cluster then you must modify PBS.pm. 
+    The idea is to re-create the scripts you use for submitting jobs inside PBS.pm. 
+    It can be tricky if you're not familiar with Perl syntax.
+    Before running ALiBERO you must able to connect passwordlessly to the cluster node that submits the jobs.
+    * MakeDock.icm is the only icm script inside MACROS dir that will be executed remotely. Please
+     change the 1st line so that it matches your icm path in the cluster
+
+ 6) VS are submitted via $ICMHOME/rundock using default parameters (i.e., -a). If you want to use a local 'rundock' script or different parameters then you must modify MakeDock/PBS.pm. Note that rundock by default uses icm 32 bit.
+
+
+                        README file for ALiBERO 1.2-e3
+---------------------------------------------------------------------------
+
+What is ALiBERO?            
+---------------------------------------------------------------------
+   ALiBERO is a new method that has automated all the steps of the LiBERO
+framework. Starting from single or multiple receptor structures, the
+software iteratively creates receptor ensembles, performs VS docking,
+and selects the combination of pockets that maximizes the recognition
+of ligand actives from decoys. The method was implemented as a free
+add-on to the ICM software (Molsoft LLC).
+
+
+What's new in ALiBERO 1.2-e3 ? 03-13-2016
+
+  General Improvements
+
+    o Changes in printed-to-screen lines.
+    o Changes in default values for 'laziness' and 'function' parameters. 
+    o Minor updates to improve performance.
+
+Common errors: Symptoms and treatment
+----------
+    o line 1: 19468 Segmentation fault      (core dumped)
+      diaghess_mrc_100_server &>/dev/null -> failed to execute: Illegal seek
+      The NMA is capped at 2500 heavy-atoms (HA). If your system is larger you will see this error.
+      Unless you have imperious reasons to include the whole protein I recommend trimming unnecessary residues. 
+    o failed to execute: Inappropriate ioctl for device
+      This error usually happens when ICM scripts can not be executed. Possibilities:
+        - Very Common: ICMHOME is not well set and the script attempts to read files that were not created by ICM. 
+          Make sure that ICMHOME is set in 'alibero' and in 1st line of MACROS/*.icm
+        - Less common: Some files have lost the execution permissions. It can happen when moving between filesystems.
+          Change the permissions so that the installation folder becomes 'rx' (chmod -R 755 $alibero/ ). Make sure that MACROS/Tether.icm is 'rx'
+        - Rare yet tricky: The icm script is executed and works fine, yet it creates some sort of error to the shell and thus a != 0 signal. If this happens drop an email to the author.
+    o ICM Tethering will NOT work properly with multi-chain objects. 
+      Recomended: Please, join the peptidic chains in one ('mv a_1.A' will join all peptidic chains in a_1.) 
+      This procedure will also work for other HET (e.g., co-factors, 'mv a_1.' will join all chains in a_1.)
+      or
+      Not Recomended: Modify Tether.icm so that it works with multichain objects (weird behaviour with 'minimze cartesian').
+    o v1.ob is the only child selected when expecting many more. This is a symptom that Hitlist.icm is not working properly. 
+        - Check that nligands includes enough actives + decoys (according to sdf indexing). 
+        - Check that nligands <= total nligands in sdf file.
+        - Check that the name of column for labelling actives / decoys is 'Active' (note the Upper case).
+        - In cluster environments, if DOCK_1 fails then Hitlist.icm won't work.
+        - Check if the best team of pockets displayed NSQ_AUC < 0 when using 'nsa' as fitness function. If so, please perform a pre-optimization.
+
+Known issues
+----------
+    o sh in ubuntu is symbolically linked to dash shell and creates "Bad fd number" with system calls.
+      To fix sudo rm /bin/sh ; sudo ln -s /bin/bash /bin/sh
+    o Some Linux distributions do not include the standard Perl library Pod::Usage. Please, install it if needed.
+
+Changelog
+----------
+
+What's new in ALiBERO 1.2-e2 ? 2014-03-20
+
+  General Improvements
+
+    o Changes in alibero man after user feedback.
+    o Changes in printed lines when -verbose or debugging.
+    o Changes in README file after user feedback.
+    o Tested with icm64 (3.7-2e/Lin-iX86-64bit/g4.1)
+    o Fixed an strange issue happening when submitting remote ssh commands to a cluster's master node.
+
+What's new in ALiBERO 1.2-e1 ? 2013-04-10
+
+  General Improvements
+
+    o Changes in alibero man after user feedback.
+    o Changes in printed lines when -verbose or debugging.
+    o Changes in README file after user feedback.
+    o Ad hoc solution for using TEST.dtb new file with old ICM exes.
+
+What's new in ALiBERO 1.2-e0 ? 2013-02-13 
+
+  General Improvements
+
+    o Changes in alibero man after user feedback.
+    o Changes in README file after user feedback.
+    o Added the parameter 'ncpuhost' to control CPUs used in desktop mode.
+
+What's new in ALiBERO 1.2-d9 ? 2012-11-02
+
+  General Improvements
+
+    o Added a few extra lines and comments in Hitlist.icm.
+    o Changes in printed lines when -verbose or debugging.
+    o Changes in alibero man after user feedback.
+    o Changes in README file after user feedback.
+    o Minor updates to improve performance.
+
+What's new in ALiBERO 1.2-d7? 2012-10-22
+
+  General Improvements
+
+    o Added a few extra lines and comments in Hitlist.icm.
+    o Changes in printed lines when -verbose or debugging.
+    o Changes in alibero man after user feedback.
+    o Changes in README file after user feedback.
+    o The script now captures typos in parameters
+    o Added the parameter 'thorougness'
+
+What's new in ALiBERO 1.2-d6? 2012-10-02
+
+  General Improvements
+
+    o Added a few extra lines and comments in Hitlist.icm.
+    o Changes in printed lines when debugging.
+    o Changes in alibero man after user feedback.
+    o Changes in README file after user feedback.
+    o Minor updates to improve performance.
+
+What's new in ALiBERO 1.2-d5? 2012-09-26
+
+  General Improvements
+
+    o Added a few extra lines and comments in Hitlist.icm.
+    o Changes in printed lines when debugging.
+    o Changes in alibero man after user feedback.
+    o Changes in README file after user feedback.
+    o Updated install.sh file.
+
+
+Disclaimer and Copyright
+------------------------
+ALiBERO - Perl script for performing Automatic Ligand guided Backbone Ensemble Receptor Optimization
+Copyright (C) 2013  Manuel Rueda
+Credits: Vsevolod Katrich (helped with early ICM scripts), Max Totrov and Ruben Abagyan (ICM docking and scoring; MOLSOFT LLC)
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+
+
+Citation: 
+------------------------
+The author requests that any published work which utilizes ALiBERO 
+includes a cite to the the following reference:
+
+ALiBERO: Evolving a Team of Complementary Pocket Conformations Rather than a Single Leader.
+(2012) J. Chem. Inf. Model., 2012, 52 (10), pp 2705–2714. DOI: 10.1021/ci3001088
+
+For ALiBERO problems, questions, or suggestions, send an e-mail to 'manuel.rueda.phd@gmail.com'.
+For ICM issues, please contact MOLSOFT LLC 'www.molsoft.com'.

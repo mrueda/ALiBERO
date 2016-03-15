@@ -1,0 +1,42 @@
+#!/pro/icm/icm/icm
+call _startup
+l_confirm=no
+
+read object "XXXXX"
+
+##################  SETUP #############################
+s_proj_name= "TEST"
+s_lig_file="LIGAND_FILE.inx"
+
+#################### RUN  #####################
+
+#assign the project name
+dockUpdateGlobals s_proj_name -1
+
+# define the binding pocket
+# e.g from grob -> as_graph: Replace(String(as_graph) {"[^]","[A-Z]"} {"",""})
+asel=a_/343,345:351,353:354,383:384,387:388,391,394,402,404,408,418:421,424:425,428,517,521:522,524:525,528,534:535,537:544
+
+#select the receptor object
+dock2SetupReceptor s_proj_name a_1. asel  no "none"
+
+#create a new object for the receptor project_name_rec
+s_out = currentDockProj.data[1] + "_rec"
+set object a_$s_out.
+
+# calculate the maps for the binding pocket. In this example
+# the grid spacing is 0.5 the maxVdW is 1.
+currentDockProj.l_readyMaps=no
+dock5CalcMaps currentDockProj.data[1] 0.5 1.0 no
+currentDockProj.data[8] = "yes"
+
+# Ligand .inx and .sdf files  selection
+# use ./example.sdf to index database
+# makeIndexChemDb "./your_file.sdf" "./your_file.inx" "mol" { "ID" }
+
+currentDockProj.data[2:9] = { "dock3DbScanSetup" "yes" "yes" "file" "mol" "auto" "yes" "yes"}
+currentDockProj.data[5] = s_lig_file
+#currentDockProj.data[9] = "no" # no 2D to 3D
+dock3DbScanSetup currentDockProj.data[1] no yes "default"
+
+quit

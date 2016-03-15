@@ -1,0 +1,700 @@
+#!/usr/bin/env perl
+#
+#   ALiBERO
+#
+#   Last Modified; March/13/2016
+#
+#   Written by:
+#   Manuel Rueda Ph.D.
+#   University of California, San Diego
+#   Skaggs School of Pharmacy & Pharmaceutical Sciences
+#   9500 Gilman Drive, MC 0747
+#   La Jolla, CA  92093-0747
+#   mrueda@scripps.edu
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Pod::Usage;
+use Cwd qw(cwd abs_path);
+use lib '/pro/alibero';
+use ALiBERO::Help;
+use ALiBERO::ICM;
+use ALiBERO::IO;
+use ALiBERO::NMA;
+use ALiBERO::PBS;
+
+# ALiBERO version
+my $version      = '1.2-e3';       #string
+my $alibero_path = abs_path($0);
+$| = 1;                            # To tell perl not to buffer output data
+
+# Software variables
+#our $rsync = '/usr/bin/rsync -z -q --bwlimit=100';    #<kb/second>
+our $rsync        = '/usr/bin/rsync -q --bwlimit=1000';    #<kb/second>
+our $dev_null     = '> /dev/null 2>&1';
+our $prompt       = 'Info:';
+our $error_prompt = 'Error:';
+our $spacer       = "****************************";
+our $arrow        = '=>';
+
+#our $ICMHOME = '/pro/icm/icm';
+our $ICMHOME = '/pro/icm/3.8-4';
+our $icm     = "$ICMHOME/icm";
+
+# Parsing arguments and Help, IO
+our %args = Help::usage($version);   # %args Hash with arguments (no _ in names)
+
+# Reading the parameters from the config file
+our %params =
+  IO::read_config_file( $args{configfile} )
+  ;                                  # %params Hash with cmd (no _ in names)
+
+# Assigning a few "global" variables. Note we use underscores in naming convention
+# New variables will be used if we need to change hash values
+our %best_children = ();
+my $gen           = 1;                         # initialize the generation
+my $where_am_i    = '';                        # To print CurrWorkDir
+my $threshold     = $params{initthreshold};    # initialize the threshold
+my $new_threshold = 0;
+my $elitism       = '';                        # For printing '*' at output
+my $n_mrc_init    = 1;                         # Defined for Gen_1.
+my $prev_auc      = $params{iauc};
+my $prev_nsa      = $params{insa};
+my $prev_score = $params{iscore};  # Scores are going to be inverted from now on
+my $prev_con   = $params{icon};    # Scores are going to be inverted from now on
+my $sleep      = 10;               # every $sleep seconds we check .ou
+my $max_wait_time   = 18000;       # 5 hours
+my $best_gen_so_far = 0;
+my $wait_for_n      = 0;
+my ( $gen_dir, $dock_dir, $repeat_dir ) = ('') x 3;
+my $status = 0;
+our $max_children = 25;
+my @print_n_children = ( 1 .. $max_children );
+
+# START MASTER PROGRAM HERE
+print "$prompt ALiBERO $version\n";
+print "$prompt ALiBERO exe: $alibero_path\n$prompt\n";
+
+# Print Arguments
+print "$prompt ARGUMENTS USED:\n";
+print "$prompt --i $args{configfile}\n";
+print "$prompt --n $args{ncpu}\n";
+print "$prompt\n";
+
+# Printing paramaters to screen
+print "$prompt ALiBERO PARAMETERS:\n";
+my $param = '';
+$~ = "PARAM";
+foreach $param ( sort keys %params ) {
+    write;
+}
+
+format PARAM =
+@|||||@<<<<<<<<<<<<<<<< @<< @<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+$prompt, $param, $arrow, $params{$param}
+.
+
+# Preparate all the initial I/O
+$status = system("mkdir -p $main::params{projdir}/GEN_1");
+if ( ( $status >>= 8 ) != 0 ) {
+    die "Failed to run mkdir -p $main::params{projdir}/GEN_1\n";
+}
+mkdir("$main::params{projdir}/LIGANDS");
+ICM::create_index_file();
+IO::io_preparation( { ( gen => $gen, bgsf => $best_gen_so_far ) } )
+  ; #Remember that if we had multiples hashes then they must be passed as REfS: {REFHASH}, (NONREFHASH)
+
+# The objects are loaded according to .icb order
+%best_children = ICM::read_icb( { ( icb => $params{inputicb} ) } );
+my %best_prev_children = %best_children;
+my $n_mrc =
+  $args{ncpu} -
+  $best_children{N}; # We needed because #mrc will change depending on # parents (note that at Gen 1 changes for checking .ou @ VS)
+
+# Core of the Evolutionary Algorithm ("monoparental" reproduction)
+print "$prompt\n$prompt STARTING ALiBERO:\n";
+
+while ( $threshold < $params{maxthreshold} && $gen <= $params{maxgen} ) {
+
+    # We are going to work physically on some folders
+    # All the important chdir should be in this MASTER script
+    chdir $params{projdir};
+    $where_am_i = cwd();
+    print "$prompt $spacer\n";
+    printf "$prompt GENERATION %2i\n", $gen
+      if ( $args{debug} || $args{verbose} );
+    print "$prompt Current dir is $where_am_i\n"
+      if $args{debug} > 1;
+
+# Set the Current Generation. From now on, the path_dirs (e.g., gen_dir, dock_dir, repeat_dir) are absolute
+    $gen_dir = "$params{projdir}/GEN_$gen";
+    mkdir $gen_dir if $gen > 1;
+    IO::io_preparation( { ( gen => $gen, bgsf => $best_gen_so_far ) } );
+    if ( $gen > 1 ) {
+        my $text_children = "children";
+        $text_children = "child" if $best_children{N} == 1;
+        print
+          "$prompt Copying VS results for $best_children{N} $text_children\n"
+          if ( $args{debug} > 1 || $args{verbose} );
+        IO::io_copy_parents( { ( gen => $gen, bgsf => $best_gen_so_far ) } );
+    }
+
+# Prepare objects within MRC? and create a random mutations (no crossover) on the parent(s) via (EN-NMA). Each parent will breed identical number of children.
+    print
+"$prompt Creating x $n_mrc new conformer(s) with NMA (total w/ parents = $args{ncpu})\n"
+      if $n_mrc && ( $args{debug} > 1 || $args{verbose} );
+    NMA::en_nma_mrc(
+        {
+            gen          => $gen,
+            receptor_dir => "$gen_dir/RECEPTORS"
+        }
+    );
+
+    $n_mrc_init = 1 if $gen == 1;
+    $n_mrc_init = $best_children{N} + 1
+      if $gen > 1;    #it contains (auc, nsa, score, con)
+
+    # Copy the ligand files remotely if params{pbs} ne off
+    if ( $params{pbs} ne 'off' && $gen == 1 ) {
+        print
+"$prompt Copying remotely ligand files and creating remote index file\n"
+          if ( $args{debug} > 1 || $args{verbose} );
+        PBS::copy_ligands_remote();
+    }
+
+    # Perform $n_mrc x $params{repeat} VS experiments on each conformer
+    for ( my $n_conf = $n_mrc_init ; $n_conf <= $args{ncpu} ; $n_conf++ ) {
+
+        # Set the DOCK_dir
+        $dock_dir = "$gen_dir/DOCK_$n_conf";
+        mkdir $dock_dir;
+
+        #
+        for ( my $n_repeat = 1 ; $n_repeat <= $params{repeat} ; $n_repeat++ ) {
+
+            # Set the repeat dir
+            $repeat_dir = "$dock_dir/$n_repeat";
+            mkdir $repeat_dir;
+            print
+"$prompt * Preparing conformation $n_conf x $n_repeat for docking\n"
+              if ( $args{debug} > 1 || $args{verbose} );
+
+            # Making maps locally if pbs = off
+            chdir $repeat_dir;
+            $where_am_i = cwd();
+            print "$prompt Current dir is $where_am_i\n"
+              if $args{debug} > 3;
+
+            #
+            if ( $n_repeat == 1 ) {
+
+     # We should copy (rsync to limit bandwidth) the MRCs here to each folder #1
+     # Note that we can have MRC?? or greater if the #parents is huge
+                $status = system(
+"$rsync $gen_dir/RECEPTORS/MRC*/RECEPTOR_$n_conf.ob $repeat_dir"
+                );
+                if ( ( $status >>= 8 ) != 0 ) {
+                    die
+"Failed to run $rsync $gen_dir/RECEPTORS/MRC*/RECEPTOR_$n_conf.ob $repeat_dir\n";
+                }
+
+                print "$prompt Building maps for $repeat_dir\n"
+                  if ( $params{pbs} eq 'off'
+                    && ( $args{debug} > 1 || $args{verbose} ) );
+            }
+            else {
+
+                # Using the files from #1
+                print "$prompt Copying files for $repeat_dir\n"
+                  if ( $args{debug} > 1 || $args{verbose} );
+            }
+
+            ICM::make_dock(
+                {
+                    n_repeat => $n_repeat,
+                    repeat   => $repeat_dir,
+                    rec_name => "RECEPTOR_$n_conf"
+                }
+            );
+
+            # VS can be local or PBS
+            print "$prompt Submitting VS for $repeat_dir\n"
+              if ( $args{debug} > 1 || $args{verbose} );
+            PBS::submit_dockscan( { repeat => $repeat_dir } );
+        }
+    }
+
+    # Check if the .ou files are complete
+    my $n_ok_vs       = 0;
+    my $n_prev_ok_vs  = 0;
+    my $n_total_vs    = $args{ncpu} * $params{repeat};
+    my $tot_wait_time = 0;
+    $n_mrc = $args{ncpu}
+      if $gen == 1
+      ; # Because we actually peformed the DOCK_ on the parent. In the next GEN_ will be copied
+
+    $wait_for_n =
+      ( $n_mrc * $params{repeat} ) * ( ( 100 - $params{laziness} ) / 100 );
+    $wait_for_n = int($wait_for_n);
+    $wait_for_n = 1 if $wait_for_n == 0;
+    print "$prompt Checking the completeness of $wait_for_n new VS result(s)\n"
+      if ( $args{debug} > 1 || $args{verbose} );
+
+    # Wait_for_n or $max_wait_time
+    until ( $n_ok_vs >= $wait_for_n || $tot_wait_time > $max_wait_time ) {
+        $n_ok_vs = 0;
+        for ( my $n_conf = $n_mrc_init ; $n_conf <= $args{ncpu} ; $n_conf++ ) {
+
+            # Set the DOCK_dir
+            $dock_dir = "$gen_dir/DOCK_$n_conf";
+            for ( my $n_repeat = 1 ;
+                $n_repeat <= $params{repeat} ; $n_repeat++ )
+            {
+
+                # Set the repeat dir
+                $repeat_dir = "$dock_dir/$n_repeat";
+                my $n_check_vs =
+                  ICM::check_end_vls( { repeat => $repeat_dir } );
+                $n_ok_vs += $n_check_vs;
+            }
+        }
+        print "$prompt OK $arrow $n_ok_vs / $wait_for_n\n"
+          if ( ( $n_ok_vs != $n_prev_ok_vs )
+            && ( $args{debug} > 1 || $args{verbose} ) );
+
+# if a job it is not finished from previous check we increase  $tot_wait_time, but only when >= 1 job is finished
+        $tot_wait_time = $tot_wait_time + $sleep
+          if ( $n_ok_vs == $n_prev_ok_vs && $n_ok_vs >= 1 );
+        $n_prev_ok_vs = $n_ok_vs;
+        print "$prompt Waiting time exceed, skipping the remaining jobs\n"
+          if ( $tot_wait_time > $max_wait_time
+            && ( $args{debug} > 1 || $args{verbose} ) );
+
+        # Wait $sleep seconds until next check
+        sleep($sleep) if $n_ok_vs < $wait_for_n;    #if finished do not sleep()
+    }
+    print "$prompt $wait_for_n files .ou and *answers* are OK\n"
+      if ( $args{debug} > 1 || $args{verbose} );
+
+# Evaluate the Virtual Screening offspring results according to the Fitness Function
+    chdir $gen_dir;
+    $where_am_i = cwd();
+    print "$prompt Current dir is $where_am_i\n"
+      if $args{debug} > 3;
+    print "$prompt Checking the performance with Hitlist script...\n"
+      if ( $args{debug} > 1 || $args{verbose} );
+
+    # Receive a Hash with child results (numbers and EF values)
+    %best_children = ICM::hitlist(
+        {
+            gen_dir => $gen_dir,
+            gen     => $gen,
+            refin   => 'off'
+        }
+    );
+    die print
+"$error_prompt Sorry but fitness function has stange values, please check what happend with Hitlist.icm execution\n"
+      if ( !$best_children{auc} || !$best_children{nsa} );
+
+    # Here we make all-atom refinement step (if any)
+    if ( $params{refinement} eq 'on' ) {
+        printf
+"$prompt Unrefined %2i %1s Children (%3i) %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %6.2f %6.2f %6.2f %6.3f\n",
+          $gen,
+          $elitism,
+          $best_children{N},
+          @best_children{@print_n_children},
+          $best_children{auc},
+          $best_children{nsa},
+          $best_children{score} * -1,
+          $best_children{con};
+
+        print "$prompt\n";
+        my $text_children = "children";
+        $text_children = "child" if $best_children{N} == 1;
+        print
+"$prompt Performing Monte Carlo refinement on $best_children{N} $text_children\n"
+          if ( $args{debug} > 1 || $args{verbose} );
+        my $n_ref_OK = ICM::refinement(
+            {
+                gen_dir => $gen_dir,
+                gen     => $gen
+            }
+        );
+        print
+"$prompt Monte Carlo refinement w/ $params{ntop} best actives successful!\n"
+          if ( $args{debug} > 1 || $args{verbose} );
+
+        # The code below is a repetition of what we did before with hitlist
+        # Perform VS on each refined conformer
+        for (
+            my $n_ref = $args{ncpu} + 1 ;
+            $n_ref <= ( $args{ncpu} + $n_ref_OK ) ;
+            $n_ref++
+          )
+        {
+
+            #the refined numbering starts at 1
+            my $n_ref_start_at_one = $n_ref - $args{ncpu};
+
+            # Set the DOCK_dir
+            $dock_dir = "$gen_dir/DOCK_$n_ref";
+            mkdir $dock_dir;
+
+            #
+            for ( my $n_repeat = 1 ;
+                $n_repeat <= $params{repeat} ; $n_repeat++ )
+            {
+                $repeat_dir = "$dock_dir/$n_repeat";
+                mkdir $repeat_dir;
+                print
+"$prompt * Preparing refined conformation $n_ref_start_at_one as: $n_ref x $n_repeat\n"
+                  if ( $args{debug} > 1 || $args{verbose} );
+
+                # Making maps locally if pbs = off
+                chdir $repeat_dir;
+                $where_am_i = cwd();
+                print "$prompt Current dir is $where_am_i\n"
+                  if $args{debug} > 3;
+
+                if ( $n_repeat == 1 ) {
+
+                    # We should move the MRCs here to each folder
+                    $status = system(
+"$rsync $gen_dir/r$n_ref_start_at_one.ob $repeat_dir/RECEPTOR_$n_ref.ob"
+                    );
+                    if ( ( $status >>= 8 ) != 0 ) {
+                        die
+"Failed to run $rsync $gen_dir/r$n_ref_start_at_one.ob $repeat_dir/RECEPTOR_$n_ref.ob\n";
+                    }
+
+                    print "$prompt Building maps for $repeat_dir\n"
+                      if ( $params{pbs} eq 'off'
+                        && ( $args{debug} > 1 || $args{verbose} ) );
+                }
+                else {
+
+                    # Using the files from #1
+                    print "$prompt Copying files for $repeat_dir\n"
+                      if ( $args{debug} > 1 || $args{verbose} );
+                }
+                ICM::make_dock(
+                    {
+                        n_repeat => $n_repeat,
+                        repeat   => $repeat_dir,
+                        rec_name => "RECEPTOR_$n_ref"
+                    }
+                );
+
+                # VS can be local or PBS
+                print "$prompt Submitting VS for $repeat_dir\n"
+                  if ( $args{debug} > 1 || $args{verbose} );
+                PBS::submit_dockscan( { repeat => $repeat_dir } );
+            }
+        }
+
+        # Check if the .ou files are complete
+        $n_ok_vs       = 0;
+        $n_prev_ok_vs  = 0;
+        $n_total_vs    = $n_ref_OK * $params{repeat};
+        $tot_wait_time = 0;
+        my $wait_for_n_ref =
+          ( $n_ref_OK * $params{repeat} ) *
+          ( ( 100 - $params{laziness} ) / 100 );
+        $wait_for_n_ref = int($wait_for_n_ref);
+        $wait_for_n_ref = 1 if $wait_for_n_ref == 0;
+        print
+          "$prompt Checking the completeness of $wait_for_n_ref VS result(s)\n"
+          if ( $args{debug} > 1 || $args{verbose} );
+
+        # Wait_for_n or $max_wait_time
+        until ( $n_ok_vs >= $wait_for_n_ref || $tot_wait_time > $max_wait_time )
+        {
+            $n_ok_vs = 0;
+            for (
+                my $n_ref = $args{ncpu} + 1 ;
+                $n_ref <= ( $args{ncpu} + $n_ref_OK ) ;
+                $n_ref++
+              )
+            {
+
+                # Set the DOCK_dir
+                $dock_dir = "$gen_dir/DOCK_$n_ref";
+                for (
+                    my $n_repeat = 1 ;
+                    $n_repeat <= $params{repeat} ;
+                    $n_repeat++
+                  )
+                {
+
+                    # Set the repeat dir
+                    $repeat_dir = "$dock_dir/$n_repeat";
+                    my $n_check_vs =
+                      ICM::check_end_vls( { repeat => $repeat_dir, } );
+                    $n_ok_vs += $n_check_vs;
+                }
+            }
+            print "$prompt OK $arrow $n_ok_vs / $wait_for_n_ref\n"
+              if ( ( $n_ok_vs != $n_prev_ok_vs )
+                && ( $args{debug} > 1 || $args{verbose} ) );
+
+# if a job it is not finished from previous check we increase  $tot_wait_time, but only when >= 1 job is finished
+            $tot_wait_time = $tot_wait_time + $sleep
+              if ( $n_ok_vs == $n_prev_ok_vs && $n_ok_vs >= 1 );
+            $n_prev_ok_vs = $n_ok_vs;
+            print "$prompt Waiting time exceed, skipping the remaining jobs\n"
+              if ( $tot_wait_time > $max_wait_time
+                && ( $args{debug} > 1 || $args{verbose} ) );
+
+            # Wait $sleep seconds until next check
+            sleep($sleep)
+              if $n_ok_vs < $wait_for_n_ref;    #if finished do not sleep()
+        }
+        print "$prompt $wait_for_n_ref files .ou and *answers* are OK\n"
+          if ( $args{debug} > 1 || $args{verbose} );
+
+# Evaluate the Virtual Screening offspring results according to the Fitness Function
+        chdir $gen_dir;
+        $where_am_i = cwd();
+        print "$prompt Current dir is $where_am_i\n"
+          if $args{debug} > 3;
+        print "$prompt Checking the performance with Hitlist script...\n"
+          if ( $args{debug} > 1 || $args{verbose} );
+
+# Receive a Hash with offspring results. In this case we are including Unrefined + Refined
+# Thus, if an unrefined is better it will pass to the next generation
+        my $ncpu_and_ntop = $args{ncpu} + $params{ntop};
+        %best_children = ICM::hitlist(
+            {
+                gen_dir => $gen_dir,
+                gen     => $gen,
+                refin   => 'on'
+            }
+        );
+        die print
+"$error_prompt Sorry but fitness function has stange values, please check what happend with Hitlist.icm execution\n"
+
+          if ( !$best_children{auc}
+            || !$best_children{nsa} );
+    }
+
+    # Here we check if we went up hill
+    if ( $params{elitism} eq 'on' ) {
+        $new_threshold = $best_children{ $params{function} };
+        if (
+            $new_threshold <= $threshold
+            || (   $params{function} eq 'nsaplus'
+                && $best_children{score} <= $prev_score )
+          )
+        {
+            print "$prompt ** Elitism ** !\n";
+            %best_children = %best_prev_children;
+            $best_gen_so_far--;
+            $elitism = '*';
+        }
+        else {
+            $best_gen_so_far = $gen - 1;
+        }
+    }
+
+    printf
+"$prompt Generation %2i %1s Children (%3i) %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %3i %6.2f %6.2f %6.2f %6.3f\n",
+      $gen,
+      $elitism,
+      $best_children{N},
+      @best_children{@print_n_children},
+      $best_children{auc},
+      $best_children{nsa},
+      $best_children{score} * -1,
+      $best_children{con};
+
+    # Keep track of the current results for the future generations
+    $threshold          = $best_children{ $params{function} };
+    $threshold          = $best_children{nsa} if $params{function} eq 'nsaplus';
+    $prev_nsa           = $best_children{nsa};
+    $prev_auc           = $best_children{auc};
+    $prev_score         = $best_children{score};
+    $prev_con           = $best_children{con};
+    %best_prev_children = %best_children;
+
+    # If threshold has a strange value then die
+    die print
+"$error_prompt Threshold for $params{function} == $threshold.\n$error_prompt It is likely that DOCK_1/1/TEST.tab does not exist and Hitlist failed. Blame the cluster :-/\n$error_prompt ...or that the number of ligands does not match the sdf file\n"
+      if $threshold == 0;
+    die print
+"$error_prompt Threshold for $params{function} == $threshold !!, fitness function has a strange value $arrow $threshold\n"
+      if $threshold > 100;
+
+    # Update generation
+    $gen++;
+    $best_gen_so_far++;
+    $elitism = '';
+    $n_mrc =
+      $args{ncpu} - $best_children{N};    # Will change depending on # parents
+
+    #die if no children are created
+    die print
+"$error_prompt The number of conformer(s) equals the number of requested CPUs\nPlease increase the number of MRCs (-n option)"
+      if ( $n_mrc <= 0 && $params{maxgen} > 1 )
+      ;    # Refinement can result in many MRC and thus negative numbers
+}
+
+# End
+print "$prompt $spacer\n$prompt ALiBERO finished OK\n";
+
+# END MASTER PROGRAM
+
+__END__
+
+=head1 NAME
+
+ALiBERO - Perl script for performing Automatic LIgand guided Backbone Ensemble Receptor Optimization
+
+=head1 SYNOPSIS
+
+alibero --n 2 -i config_file [-options]
+
+     Arguments:
+       -n                             Total number of conformers
+       -i|input                       Configuration file
+
+     Options:
+       -h|help                        Brief help message
+       -man                           Full documentation
+       -debug                         Print debugging (from 1 to 5, being 5 max)
+       -verbose                       Verbosity on
+       -v                             Version
+
+=head1 CITATION
+
+ALiBERO was first presented at the G Protein-Coupled Receptors (C3) Keystone symposia. April 7 - 12, 2010. Beaver Run Resort, Breckenridge, Colorado, and at the Structre Based Drug Design CHI conference, Cambridge, MA, June 8 - 10, 2011.
+
+The author requests that any published work which utilizes ALiBERO includes a cite to the the following reference:
+
+ALiBERO: Evolving a Team of Complementary Pocket Conformations Rather than a Single Leader.
+(2012) J. Chem. Inf. Model., 2012, 52 (10), pp 2705–2714. DOI: 10.1021/ci3001088
+
+Complementary information can be obtained from this book chapter:
+Ligand-guided receptor optimization. Methods Mol Biol. 2012; 857: 189-205.
+
+
+=head1 SUMMARY
+
+ALiBERO is a new method that has automated all the steps of the LiBERO framework. Starting from single or multiple receptor structures, the software iteratively creates receptor ensembles, performs VS docking, and selects the combination of pockets that maximizes the recognition of ligand actives from decoys. The method was implemented as a free add-on to the ICM software (Molsoft LLC) 
+
+=head1 HOW TO RUN ALiBERO
+
+
+For executing ALiBERO you will need (i) input files and (ii) a configuration file.
+
+For the input files we recommend using the following hierarchy (see "test" at installation directory):
+
+(i) INPUT directory consisting of the subdirs "LIGANDS", "RECEPTORS" and "MACROS"
+   Within LIGANDS dir, you will need to have a .sdf file. 
+    - You must include a column named "Active" with a value of 1 (Integer) for actives and 0 (Integer)  for decoys. IMP->You MUST include decoys, otherwise calcNSA macro will fail
+   Within RECEPTORS you will need an .icb file with the objects (already converted). AliBERO will use ALL the objects within the ICB file. There is no need de per se that the receptors are superimposed, however is strongly recommended for visualization purposes.
+   Within MACROS you will need to have 4 icm scripts (Tether.icm, MakeDock.icm, Hitlist.icm and Refine_Hitlist.icm (only used if ref = on)) and you must modify these two lines:
+	a/ "asel" in MakeDock.icm
+        b/ The atoms to be drestrained (if any) in Refine_Hitlist.icm
+    The icm scripts will be used as template-text files during the execution
+
+(ii) A configuration file containing the parameters for your calculation
+
+Below are the parameters available. Pleave a blank space(s) or tab between the parameter and the value. 
+
+ # Essential
+cfsdir         /cfs/user         # Abagyan's lab private fs within cluster
+function       nsaplus           # [auc|nsa|nsaplus|score|con]. Fitness function for the "Evolutionary Algorithm"
+inputicb       undef             # Path to the icb file containing the objects (receptor structures)
+macrodir       undef             # Path to the MACRO dir
+mrc            3                 # [1..N] Maximum number of complementary pocket conformations on every generation 
+nligands       100               # Number of ligands used in VS (nligands <= nligands:sdf file)
+pbs            off               # [off|bluefish|triton] 
+projdir        ALiBERO_TEST      # Path to the project directory
+refinement     off               # [on|off] Monte Carlo all-atom complex refinement with best active(s)
+sdf            undef             # Path to the sdf file
+temperature    300               # Temperature (K) for the heavy-atom NMA; 1A->300, 1.5A ->600, 2A->1100, 2.5A->1600
+
+ # Non-essential
+elitism        on                # [on|off] w/ 'on' the optimization will go 'up-hill' only 
+iauc           0                 # Initial AUC value (e.g., if restarting a job)
+icon           0                 # Initial CONSISTENCY value (e.g., if restarting a job)
+insa           0                 # Initial NSA value (e.g., if restarting a job)
+iscore         0                 # Initial SCORE value (e.g., if restarting a job)
+laziness       0                 # % of child-zombie-threads allowed (useful when cluster nodes fail)
+maxauc         99                # Maximum AUC
+maxgen         10                # Maximum number of generations allowed
+maxnsa         99                # Maximum NSA
+maxscon        1                 # Maximum CONSISTENCY value
+maxscore       -99               # Maximum SCORE
+nmodes         100               # Number of Normal Modes used
+ntop           3                 # Number of top complexes with active compounds to be refined 
+rdistance      off               # [on|off] A logical function to be applied to the fitness function (see also "function")
+remoteuser     user              # Sometimes username is different on remote machines
+repeat         1                 # Number of repeats of the VS experiment
+thoroughness   1                 # This value represents the length of the ICM docking simulation. 
+ncpuhost                         # [ncpu] In Desktop mode, defines the number of cpus that can be used for VS
+
+
+ALiBERO will create a project directory (projdir) where individual generations will be named "GEN_X". The results will appear as an ICB file (Gen_X.icb or Gen_Ref_X.icb if refinement=on) that can be browsed with ICM. The table with the final results is labelled as "T_Results".
+
+The calculation can be restarted by using Gen*.icb as input files (inputicb) and by using initial values for the fitness function (i.e., insa).
+
+It is important that you familiarize yourself with the script by sumbmitting  a few test runs locally, that is, to your Desktop ( or workstation ) machine (pbs = off). When pbs = off ALiBERO will only submit jobs when CPUs become available (see 'ncpuhost' parameter). We recommend using the -verbose (or -debug 5) argument to monitor what happens behind the curtain.
+Those using it in a Linux cluster will need to modify PBS.pm so that the module works in your environment.
+
+NB1: Make sure that the path to icm exe is correct at the first line of the icm scripts, and in alibero exe (e.g., our $ICMHOME = '/pro/icm/icm');
+
+NB2: Sometimes the icm scripts change when the perl software is updated. Please, if you get an updated version of alibero, take also a revised version of the MACROS/*icm 
+
+NB3: the .icm scripts under GEN_X/ can be re-executed individually after the runs are finished (i.e., you can re-run ./Hitlist.icm and you will get identical results). Note that the scripts do not use arguments.
+
+NB4: We recommend keeping the #ligands in the sdf file < 1000. If you put more, Hitlist.icm will take muuuuch longer. If you have > 1000 actives you may want to speed up a bit (x2) Hitlist.icm by commenting the lines involving 'Consistency' calculation (see Hitlist.icm)
+
+NB5: 'score' will use  as fitness function average docking score for best scored half of actives. This portion can be easily modified at Hitlist.icm. Consistency is computed for all actives, but also can be narrowed at Hitlist.icm.
+
+NB6: The ICM scores in T_Results are shown inverted ( Score * -1)
+
+NB7: If you only want Monte Carlo refinement (no NMA) you must set -n equal to the number of receptors in the icb file and set ref = on, maxgen = 1. 
+
+NB8: With distant homology models the best results are obtained with "prepared" receptors, that is, well aligned, converted &| previously refined with seed ligands.
+
+NB9: 'nsaplus' only progresses if NSA & scores are better than those from the previous generation.
+
+
+=head1 AUTHOR 
+
+Written by Manuel Rueda with the help from Seva Katrich (ICM scripts), Max Totrov and Ruben Abagyan (ICM docking and scoring; MOLSOFT LLC).
+
+=head1 REPORTING BUGS
+
+Report bugs or comments to <mrueda@scripps.edu>.
+
+=head1 HOW TO RUN ALiBERO
+
+./alibero -n 8 -i config_file
+
+./alibero --n 4 --i config_file --verbose
+
+./alibero -n 100 -i config_file -debug 3 > log &
+
+$path_to_alibero/alibero --n 25 -i config_file -debug 5
+
+
+=over
+
+=item Info about ICM can be found at L<http://www.molsoft.com>
+
+=back
+
+=cut
+
+=head1 COPYRIGHT
+
+This PERL file is released under the GPL. See the LICENSE file included in this distribution or go to <http://www.gnu.org/licenses/gpl.html>.
+
+There is NO WARRANTY, to the extent permitted by law.
+
+=cut
+

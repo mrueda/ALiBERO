@@ -1,0 +1,40 @@
+#!/pro/icm/icm/icm
+call _startup
+
+programName = File(last)
+s_syntax = " Syntax: " + programName +" refObject inPdb"
+icInfo = Getarg("-v",no,delete) | Getarg("-info",no,delete)
+if icInfo l_commands = yes
+
+# FLAGS AND PARAMS HERE
+files = Getarg(list,delete)
+if Nof(files)!=2 | Getarg("-h",no) quit s_syntax
+
+inobject = files[1]
+inpdb    = files[2]
+
+if(!Exist(inobject)) quit " Error_"+programName+"> file "+inobject+" not found\n"+s_syntax
+if(!Exist(inpdb))    quit " Error_"+programName+"> file "+inpdb+" not found\n"+s_syntax
+
+# read the correct topology
+read object inobject
+
+# Read the displaced coordinates, no need to convert
+read pdb inpdb
+
+# Now we move the reference object to the displaced coordinates
+delete tz
+set object a_1.
+set tether a_1.//!h* a_2.//!h* align
+minimize tether
+
+# removing things
+delete tether
+delete a_2.
+
+# Finally we perform a slight cartesian minimization 
+minimize cartesian a_1. 25
+
+# Save object
+write object "Tethered"
+quit

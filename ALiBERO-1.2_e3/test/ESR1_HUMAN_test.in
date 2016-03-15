@@ -1,0 +1,6 @@
+inputicb      INPUT/RECEPTORS/aliberoMicro.icb
+projdir       ESR1_HUMAN_test
+cfsdir        /cfs/mrueda/CFS_TEST_ALiBERO #Only for Abagyan lab
+nligands      41
+sdf           INPUT/LIGANDS/v10actives_w31Decoys.sdf
+macrodir      INPUT/MACROS

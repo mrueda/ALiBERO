@@ -1,0 +1,305 @@
+#!/pro/icm/icm/icm 
+call _startup
+l_confirm=no
+l_info=yes
+
+# User parameters
+ADSdiv = 2   # integer, 2-> 50%, 4-> 25%, etc.
+Cdiv   = 1   # integer, 2-> 50%, 4-> 25%, etc
+
+### ALiBERO Parameters
+N_mrc = NMRC
+
+read sys ls -1fd DOCK_{?,??,???}  # If the job is unfinished (laziness) then DOCK_X will be ignored at hitlist stage
+Sdir = Split(s_out, "\n")
+NN = Nof(Sdir)
+
+if (N_mrc > NN) then
+ N_mrc = NN
+endif
+
+read index "LIGAND_FILE.inx"
+read table index INX_NAME name="chem" #to get .IX column
+
+N_rows = ( (NN*NN + NN) / 2) + (NN*N_mrc)
+
+varTable = ""
+varRedSize = Sarray(N_rows) # 199 #ARGV limit
+if (N_mrc > 1 ) then
+  N_cols_mrc = N_mrc
+else
+ N_cols_mrc = N_mrc + 1 # To have Rec2 column
+endif
+
+for varT=1,N_cols_mrc
+ varTable = varTable + "varRedSize \"Rec" + varT+"\""
+endfor
+
+group table copy "T_Results" \
+Count(1 N_rows) "No" \
+$varTable \
+Rarray(N_rows) "Roc" \
+Rarray(N_rows) "Nsa" \
+Rarray(N_rows) "SCORE_AV" \
+Rarray(N_rows) "Con" \
+Rarray(N_rows) "Distance" 
+
+# Select column in T_ROC_Nsa with objective function 
+fitness_function = "FUNCTION"   
+if (fitness_function == "NSA" ) then
+    f_fit="Nsa"
+ print "using NSA as Fitness function"
+elseif (fitness_function == "AUC" ) then
+    f_fit="Roc"
+ print "using AUC as Fitness function"
+elseif (fitness_function == "SCORE" ) then
+   f_fit="SCORE_AV"   
+ print "using Score as Fitness function"
+else
+   f_fit="Con"   
+ print "using Consistency as Fitness function"
+endif
+
+# Switch for distance check
+distance_check = "DISTANCE_CHECK"
+Rdistance = 1
+
+newIndex = 1
+
+##########
+# N X N  #
+##########
+# including diagonal so that we have i x i (singleton)
+
+for i=1,NN
+ i_dir = "DOCK_" + i + "/?/TEST_answers1*"
+ 
+ # Computing only diagonal (singletons) when N_mrc = 1 
+ if ( N_mrc == 1) then
+  MM = i
+ else
+  MM = NN
+ endif
+
+ for j=i,MM
+  j_dir = "DOCK_" + j + "/?/TEST_answers1*"
+
+  T_Results.Rec1[newIndex] = "DOCK_" + i
+  T_Results.Rec2[newIndex] = "DOCK_" + j
+  ij_dir = i_dir + " " + j_dir 
+  hitlistVar = "\"DOCK_" + i + "/1/TEST\" \"" + ij_dir + "\" \"TEST_answers\" no yes yes"
+
+  # projName: objFileName: listName: import2DfromDB: makeUnique:
+  scanMakeHitList $hitlistVar
+  if (Nof(TEST_answers)==NLIGANDS) then  #skip if hitlist incomplete (to avoid "artificial" high AUC/NSA)  
+   I_chem=(chem.IX==TEST_answers.IX).IX
+   TEST_answers=TEST_answers[I_chem]
+   add column TEST_answers chem.Active[I_chem]  	name="Active" 	index=2 append
+
+   # Calc Nsa and ROC
+   R_out={0.,0.,0.,0.,0.}  
+   calcRoc TEST_answers.Score TEST_answers.Active yes
+   T_Results.Roc[newIndex]=R_out[1] 
+   calcNsa TEST_answers.Score TEST_answers.Active 0. no yes no
+   T_Results.Nsa[newIndex]=R_out[1] 
+
+   T_Results.Distance[newIndex] = Rdistance
+   T_Results.Roc[newIndex] = T_Results.Roc[newIndex] *  Rdistance
+   T_Results.Nsa[newIndex] = T_Results.Nsa[newIndex] *  Rdistance
+
+   # Calculate Consistency (this takes a while for datasets > 1000 ligands)
+   # If that's the case, comment the lines and add C = 1.0 
+   sort reverse TEST_answers.Active TEST_answers.Score
+   N_actives=Nof(TEST_answers.Active==1)
+   N_Con = N_actives/Cdiv
+   read pmf s_icmhome+ "APF"
+   ActivesAPF = "TEST_answers" + ".mol[1:" + $N_Con + "]"
+
+   m = Score( $ActivesAPF similarity )
+   C =  Mean( Rarray(m, 6)  )
+   T_Results.Con[newIndex] = C * Rdistance
+   
+   # Calculate Average Score of actives 
+   N_score=N_actives/ADSdiv  #integer
+   print "Average score for top"+ N_score  
+   T_Results.SCORE_AV[newIndex]=(-1.)*Mean((TEST_answers.Active==1).Score[1:N_score]) * Rdistance 
+
+   # Cleaning and renaming
+   T_temp= T_Results   
+   sort reverse T_temp.$f_fit 
+   if (T_Results.$f_fit[newIndex]> T_temp.$f_fit[2]) then
+    delete T_answ_$T_temp.No[2]
+    delete troc_$T_temp.No[2]
+    rename TEST_answers "T_answ_" + newIndex
+    rename troc "troc_" + newIndex
+   endif  
+  endif
+  newIndex = newIndex + 1
+ endfor
+endfor
+
+# Check if a singleton was the best 
+# if so, we'll skip N x N + N step
+if (T_temp.Rec1[1] == T_temp.Rec2[1]) then
+ singleton = 1
+else
+ singleton = 0
+endif
+
+if (N_mrc > 2 & singleton == 0 ) then
+
+###############
+#  N X N + N  # 
+###############
+# Adding N to best N X N. We allowed repetitions (i.e., DOCK_1 & DOCK_2 + DOCK 1)
+
+ for mrc=3,N_mrc # Start MRC LOOP
+
+ # Make a tmp_mrc_T table to enable sort w/o losing newIndex. The updated table will still be T_Results
+ mrcMin = mrc - 1
+ tmp_mrc_T = "mrc" + $mrcMin + "_T_Results"
+ $tmp_mrc_T = T_Results # $tmp_mrc_T contains a Table of 2...to mrc. 
+ sort reverse $tmp_mrc_T.$f_fit
+
+ workRec= "Rec" + mrc
+
+ for k=1,NN # Start loop for each conformer. k can be == i or == j
+
+  cum_dir = ""
+  for l=1,mrcMin
+   tmpRec    = "Rec" + l
+   tmpRecBis = "Rec" + l + "[1]"
+   cum_dir =  cum_dir + $tmp_mrc_T.$tmpRecBis + "/?/TEST_answers1*" + " "
+   T_Results.$tmpRec[newIndex] = $tmp_mrc_T.$tmpRecBis
+  endfor
+
+  hit_dir = ""
+  k_dir = "DOCK_" + k + "/?/TEST_answers1*"
+  T_Results.$workRec[newIndex] = "DOCK_" + k
+  hit_dir = cum_dir + k_dir
+  hitlistVar = "\"DOCK_" + k + "/1/TEST\" \"" + hit_dir + "\" \"TEST_answers\" no yes yes"
+
+  # projName: objFileName: listName: import2DfromDB: makeUnique:
+  scanMakeHitList $hitlistVar
+  if (Nof(TEST_answers)==NLIGANDS) then  #skip if hitlist incomplete (to avoid "artificial" high AUC/NSA)  
+   I_chem=(chem.IX==TEST_answers.IX).IX
+   TEST_answers=TEST_answers[I_chem]
+   add column TEST_answers chem.Active[I_chem]          name="Active"   index=2 append
+
+   # Calc Nsa and ROC
+   R_out={0.,0.,0.,0.,0.}
+   calcRoc TEST_answers.Score TEST_answers.Active yes
+   T_Results.Roc[newIndex]=R_out[1]
+   calcNsa TEST_answers.Score TEST_answers.Active 0. no yes no
+   T_Results.Nsa[newIndex]=R_out[1]
+
+   T_Results.Distance[newIndex] = Rdistance
+   T_Results.Roc[newIndex] = T_Results.Roc[newIndex] *  Rdistance
+   T_Results.Nsa[newIndex] = T_Results.Nsa[newIndex] *  Rdistance
+
+   # Calculate Consistency (this takes a while for datasets > 1000 ligands)
+   # If that's the case, comment the lines and add C = 1.0 
+   sort reverse TEST_answers.Active TEST_answers.Score
+   N_actives=Nof(TEST_answers.Active==1)
+   N_Con = N_actives/Cdiv
+   read pmf s_icmhome+ "APF"
+   ActivesAPF = "TEST_answers" + ".mol[1:" + $N_Con + "]"
+
+   m = Score( $ActivesAPF similarity )
+   C =  Mean( Rarray(m, 6)  )
+   T_Results.Con[newIndex] = C * Rdistance
+
+   # Calculate Average Score of actives 
+   N_score=N_actives/ADSdiv  #integer
+   print "Average score for top"+ N_score  
+   T_Results.SCORE_AV[newIndex]=(-1.)*Mean((TEST_answers.Active==1).Score[1:N_score]) * Rdistance
+
+   # Cleaning and renaming
+   T_temp= T_Results   
+   sort reverse T_temp.$f_fit
+   if (T_Results.$f_fit[newIndex]> T_temp.$f_fit[2]) then
+     delete T_answ_$T_temp.No[2]
+     delete troc_$T_temp.No[2]
+     rename TEST_answers "T_answ_" + newIndex
+     rename troc "troc_" + newIndex
+    endif  
+  endif
+  newIndex = newIndex + 1
+
+  endfor # End of K LOOP
+
+  varTMP = f_fit + "[1]"
+    
+ ########################
+ # IMPORTANT STEP BELOW #
+ ########################
+
+ # If the updated table T_Results (sorted as T_temp) has not been improved by adding N
+ # then we keep the previous T_Results = $tmp_mrc_T
+ # T_temp will have the values of the current mrc, in case we wanted to recover it
+ if ( T_temp.$varTMP <= $tmp_mrc_T.$varTMP ) then
+    T_Results = $tmp_mrc_T
+   break
+ endif
+
+ ########################
+ # IMPORTANT STEP ABOVE #
+ ########################
+
+
+ endfor # END of MRC LOOP
+
+endif
+
+####################################
+
+sort reverse T_Results.$f_fit
+
+print "T_Results_Auc_Marker"
+T_Results.Roc[1]
+
+print "T_Results_Nsa_Marker"       
+T_Results.Nsa[1]
+      
+print "T_Results_SCORE_AV_Marker"  
+T_Results.SCORE_AV[1]
+
+print "T_Results_Con_Marker"
+T_Results.Con[1]
+
+for i=1,N_mrc
+
+ varText="Rec" + i
+ print "T_Results_Rec_Name_Marker_" + i + "_END"
+ T_Results.$varText[1] # empty when N_mrc > Nteam
+
+ read object T_Results.$varText[1] + "/1/TEST_rec.ob"
+ tmpName = Replace(T_Results.$varText[1] "DOCK_" "")
+ if (Exist($tmpName)) then
+   delete a_v$tmpName.
+  rename a_TEST_rec. tmpName
+  write object 
+ endif
+
+endfor
+
+# Using hidden hitlist.FILE column to get the path of the receptor used
+# .FILE will be lost after 'scanStandaloneHitList' so we must chase it before
+bestHitlist = "T_answ_" + T_Results.No[1]
+bestHitlistFILE = bestHitlist + ".FILE"
+add column $bestHitlist Replace( $bestHitlistFILE , "(.+)/DOCK_(.+)/(.+)", "v\\2" regexp ) append name="RecName"
+set format show off $bestHitlist.RecConf # This column only works with 4D-Docking
+
+# Finally create a standalone Hitlist that can be read with ICM Browser
+ux cp DOCK_1/1/TEST.tab .
+ux cp DOCK_1/1/TEST_rec.ob . # To avoid X-windows with scanDsHit
+scanStandaloneHitList Name( $bestHitlist table)
+
+# Cleaning the project
+delete a_TEST_rec. # object
+delete TEST_answers tnsa troc T_temp # Tables
+ux rm TEST.tab TEST_rec.ob #files
+
+# Write icb file
+writeProject "Gen_XXXX" yes  # Make it Gen_$gen
+q
